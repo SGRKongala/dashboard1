@@ -1,12 +1,11 @@
 services:
   - type: web
-    name: sensor-dashboard
+    name: dash-corruption-dashboard
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn aws:app.server
-    python_version: 3.9
+    startCommand: gunicorn app:server
     envVars:
       - key: AWS_ACCESS_KEY
         sync: false
       - key: AWS_SECRET_KEY
-        sync: false 
+        sync: false
