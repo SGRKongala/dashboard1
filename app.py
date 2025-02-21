@@ -307,7 +307,13 @@ def find_free_port(start_port=8050, max_port=8070):
             continue
     raise OSError("No free ports found in range")
 
+# Make sure all routes are handled
+@server.route('/')
+def index():
+    return app.index()
+
 if __name__ == "__main__":
     # Use PORT environment variable provided by Render
     port = int(os.environ.get("PORT", 8051))
     app.run_server(debug=False, host='0.0.0.0', port=port)
+
