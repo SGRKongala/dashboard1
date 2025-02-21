@@ -3,7 +3,7 @@ services:
     name: sensor-dashboard
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn aws:server
+    startCommand: gunicorn aws:app.server
     python_version: 3.9
     envVars:
       - key: AWS_ACCESS_KEY
