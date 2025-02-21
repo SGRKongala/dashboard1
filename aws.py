@@ -17,6 +17,7 @@ from functools import lru_cache
 import time
 import socket
 from botocore.config import Config
+import tempfile
 
 # AWS Configuration
 # Use environment variables for AWS credentials
@@ -79,7 +80,6 @@ def load_data():
         file_size = response['ContentLength']
         
         # Create a temporary file
-        import tempfile
         temp_file = tempfile.NamedTemporaryFile(delete=False, mode='wb')
         
         # Download with chunks to avoid memory issues
