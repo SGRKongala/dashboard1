@@ -17,39 +17,50 @@ from functools import lru_cache
 import time
 import socket
 from botocore.config import Config
+import tempfile
+from botocore import UNSIGNED
 
-# AWS Configuration
-# Use environment variables for AWS credentials
-AWS_ACCESS_KEY = os.environ.get('AWS_ACCESS_KEY')
-AWS_SECRET_KEY = os.environ.get('AWS_SECRET_KEY')
+print("Script starting...")
+import sys
+print(f"Python version: {sys.version}")
+print("Importing modules...")
 
-if not AWS_ACCESS_KEY or not AWS_SECRET_KEY:
-    raise ValueError("AWS credentials not found in environment variables")
+# DEVELOPER MODE FLAG
+DEVELOPER_MODE = True  # Set to True for local development
 
-# Define your bucket name and local file details
-BUCKET_NAME = "mytaruccadb1"
-LOCAL_FILE_PATH = "DB/text.db"
-S3_OBJECT_NAME = "meta_data.db"
+# Local database path
+LOCAL_DB_PATH = "DB/text.db"  # Update this to your local DB path
 
-# Initialize S3 client with custom configuration
-try:
-    s3 = boto3.client(
-        "s3",
-        aws_access_key_id=AWS_ACCESS_KEY,
-        aws_secret_access_key=AWS_SECRET_KEY,
-        region_name='ap-southeast-2',
-        config=Config(
-            connect_timeout=5,
-            read_timeout=300,
-            retries={'max_attempts': 3}
+# S3 configuration - same as aws1.py
+S3_BUCKET = "public-tarucca-db"
+S3_KEY = "text.db"
+
+# Function to get database file from S3
+def get_db_file():
+    """Download the database file from S3 to a temporary file"""
+    try:
+        # Create a temporary file that will be deleted when closed
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        temp_file_path = temp_file.name
+        temp_file.close()
+        
+        print(f"Downloading database from S3: {S3_BUCKET}/{S3_KEY}")
+        
+        # Create an S3 client with unsigned config for public bucket access
+        s3_client = boto3.client(
+            's3',
+            region_name='eu-central-1',
+            config=Config(signature_version=UNSIGNED)
         )
-    )
-    # Test the connection
-    s3.list_buckets()
-    print("AWS credentials verified successfully")
-except Exception as e:
-    print(f"AWS Configuration Error: {str(e)}")
-    raise
+        
+        # Download the file
+        s3_client.download_file(S3_BUCKET, S3_KEY, temp_file_path)
+        print(f"Database downloaded successfully to temporary file")
+        return temp_file_path
+        
+    except Exception as e:
+        print(f"Error downloading database from S3: {str(e)}")
+        raise
 
 # Initialize Flask
 server = Flask(__name__)
@@ -58,7 +69,7 @@ server = Flask(__name__)
 app = dash.Dash(
     __name__, 
     server=server,
-    url_base_pathname='/corruption/'  # Make sure this matches exactly
+    url_base_pathname='/'  # Changed to root path for local development
 )
 
 # Define all channel-sensor combinations
@@ -69,59 +80,73 @@ for ch in ['ch1', 'ch2', 'ch3']:
 
 @lru_cache(maxsize=32)
 def load_data():
-    temp_file = None
     try:
+        global DEVELOPER_MODE
         start_time = time.time()
         print("Starting data load...")
         
-        # Get the object from S3 with progress tracking
-        response = s3.get_object(Bucket=BUCKET_NAME, Key=S3_OBJECT_NAME)
-        file_size = response['ContentLength']
-        
-        # Create a temporary file
-        import tempfile
-        temp_file = tempfile.NamedTemporaryFile(delete=False, mode='wb')
-        
-        # Download with chunks to avoid memory issues
-        chunk_size = 1024 * 1024  # 1MB chunks
-        downloaded = 0
-        stream = response['Body']
-        
-        while True:
-            chunk = stream.read(chunk_size)
-            if not chunk:
-                break
-            temp_file.write(chunk)
-            downloaded += len(chunk)
-            progress = (downloaded/file_size)*100
-            print(f"Downloaded: {progress:.1f}% ({downloaded}/{file_size} bytes)")
+        # S3 database loading (using the same approach as aws1.py)
+        temp_file_path = None
+        try:
+            # Get the database file from S3
+            temp_file_path = get_db_file()
             
-        temp_file.close()
-        
-        # Create connection and read data
-        with sqlite3.connect(temp_file.name) as conn:
-            # Read the data
-            df = pd.read_sql('SELECT * FROM main_data', conn)
-            df_rpm = pd.read_sql('SELECT * FROM rpm', conn)
-            df1 = pd.read_sql('SELECT * FROM corruption_status', conn)
-            
-            # Merge dataframes
-            merged_df1 = pd.merge(df, df1, on='id', how='inner')
-            merged_df2 = pd.merge(df, df_rpm, on='id', how='inner')
-            
-            # Convert time columns
-            merged_df1['time'] = pd.to_datetime(merged_df1['time'])
-            merged_df2['time'] = pd.to_datetime(merged_df2['time'])
-            
-            print(f"Data load completed in {time.time() - start_time:.2f} seconds")
-            return merged_df1, merged_df2
+            # Create connection and read data
+            with sqlite3.connect(temp_file_path) as conn:
+                # Read the data
+                df = pd.read_sql('SELECT * FROM main_data', conn)
+                df_rpm = pd.read_sql('SELECT * FROM rpm', conn)
+                df1 = pd.read_sql('SELECT * FROM corruption_status', conn)
+                
+                # Add diagnostic information
+                print(f"Data loaded from database:")
+                print(f"main_data shape: {df.shape}")
+                print(f"rpm shape: {df_rpm.shape}")
+                print(f"corruption_status shape: {df1.shape}")
+                
+                # Check available years
+                if 'time' in df.columns:
+                    df['time'] = pd.to_datetime(df['time'])
+                    years = sorted(df['time'].dt.year.unique())
+                    print(f"Available years in data: {years}")
+                
+                # Check corruption data for 2023
+                if 'time' in df.columns and not df.empty:
+                    df_2023 = df[df['time'].dt.year == 2023]
+                    print(f"Records for 2023: {len(df_2023)}")
+                    
+                    # Check if there's any corruption data for 2023
+                    if not df_2023.empty and not df1.empty:
+                        merged_2023 = pd.merge(df_2023, df1, on='id', how='inner')
+                        # Check a few sensor columns
+                        for col in df1.columns:
+                            if col != 'id' and col.startswith(('ch1', 'ch2', 'ch3')):
+                                corruption_count = merged_2023[col].sum()
+                                total_count = len(merged_2023)
+                                print(f"2023 - {col}: {corruption_count} corrupted out of {total_count} ({corruption_count/total_count*100:.2f}%)")
+                                if corruption_count == 0:
+                                    print(f"WARNING: No corruption detected for {col} in 2023")
+                
+                # Merge dataframes
+                merged_df1 = pd.merge(df, df1, on='id', how='inner')
+                merged_df2 = pd.merge(df, df_rpm, on='id', how='inner')
+                
+                # Convert time columns
+                merged_df1['time'] = pd.to_datetime(merged_df1['time'])
+                merged_df2['time'] = pd.to_datetime(merged_df2['time'])
+                
+                print(f"Data load completed in {time.time() - start_time:.2f} seconds")
+                return merged_df1, merged_df2
+                
+        finally:
+            # Clean up temporary file
+            if temp_file_path and os.path.exists(temp_file_path):
+                os.unlink(temp_file_path)
+                print("Temporary database file removed")
             
     except Exception as e:
-        print(f"Error loading data from S3: {str(e)}")
+        print(f"Error loading data: {str(e)}")
         raise
-    finally:
-        if temp_file and os.path.exists(temp_file.name):
-            os.unlink(temp_file.name)
 
 # Load initial data
 try:
@@ -138,6 +163,7 @@ except Exception as e:
     merged_df2 = pd.DataFrame()
     years = []
 
+# App layout remains the same
 app.layout = html.Div([
     html.H1("Weekly Sensor Performance Dashboard"),
     
@@ -181,10 +207,10 @@ app.layout = html.Div([
         fullscreen=True
     ),
     
-    # Add initial loading message
+    # Update loading message for developer mode
     html.Div(
         id='initial-loading',
-        children='Loading data from S3... This may take a few minutes on first load.',
+        children='Loading data from local database...' if DEVELOPER_MODE else 'Loading data from S3... This may take a few minutes on first load.',
         style={
             'textAlign': 'center',
             'padding': '20px',
@@ -194,6 +220,7 @@ app.layout = html.Div([
     )
 ])
 
+# Callback remains the same
 @app.callback(
     [Output('weekly-heatmap', 'figure'),
      Output('loading-output', 'children')],
@@ -204,7 +231,20 @@ def update_heatmap(selected_year, selected_sensor):
     try:
         if selected_year is None or selected_sensor is None:
             print("Missing required inputs")
-            raise PreventUpdate
+            empty_fig = go.Figure()
+            empty_fig.update_layout(
+                title="Please select both year and sensor",
+                annotations=[dict(
+                    text="Please select both year and sensor to display data",
+                    showarrow=False,
+                    xref="paper",
+                    yref="paper",
+                    x=0.5,
+                    y=0.5
+                )]
+            )
+            return empty_fig, html.Div("Please select both year and sensor", 
+                                     style={'color': 'orange'})
             
         start_time = time.time()
         print(f"Updating heatmap for year: {selected_year}, sensor: {selected_sensor}")
@@ -213,9 +253,11 @@ def update_heatmap(selected_year, selected_sensor):
         mask = merged_df1['time'].dt.year == selected_year
         df_year = merged_df1[mask].copy()
         
+        print(f"Records for {selected_year}: {len(df_year)}")
+        
         if df_year.empty:
-            print("No data for selected year")
-            return {}, html.Div("No data available for the selected year", 
+            print(f"No data for selected year: {selected_year}")
+            return {}, html.Div(f"No data available for the year {selected_year}", 
                               style={'color': 'red'})
             
         # Add week number to the dataframe
@@ -224,6 +266,18 @@ def update_heatmap(selected_year, selected_sensor):
         # Count actual corruption markings (1s) for the selected sensor
         df_year['is_corrupted'] = (df_year[selected_sensor] == 1).astype(int)
         
+        # Print corruption statistics
+        corruption_count = df_year['is_corrupted'].sum()
+        total_count = len(df_year)
+        corruption_percentage = (corruption_count / total_count * 100) if total_count > 0 else 0
+        print(f"Corruption statistics for {selected_year}, {selected_sensor}:")
+        print(f"  Total records: {total_count}")
+        print(f"  Corrupted records: {corruption_count} ({corruption_percentage:.2f}%)")
+        
+        # Check if all values are 0
+        if corruption_count == 0:
+            print(f"WARNING: All values for {selected_sensor} in {selected_year} are 0 (not corrupted)")
+            
         # Group by week and calculate metrics
         weekly_stats = df_year.groupby('week').agg({
             'id': 'count',  # Total samples
@@ -295,25 +349,8 @@ def update_heatmap(selected_year, selected_sensor):
         print(error_msg)
         return {}, html.Div(f"Error: {str(e)}", style={'color': 'red'})
 
-def find_free_port(start_port=8050, max_port=8070):
-    """Find a free port in the given range."""
-    for port in range(start_port, max_port + 1):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            sock.bind(('0.0.0.0', port))
-            sock.close()
-            return port
-        except OSError:
-            continue
-    raise OSError("No free ports found in range")
-
-# Make sure all routes are handled
-@server.route('/')
-def index():
-    return app.index()
-
 if __name__ == "__main__":
-    # Use PORT environment variable provided by Render
-    port = int(os.environ.get("PORT", 8051))
-    app.run_server(debug=False, host='0.0.0.0', port=port)
-
+    # Use a fixed port for local development
+    port = 8050
+    print(f"Starting development server on port {port}")
+    app.run_server(debug=True, host='0.0.0.0', port=port)
